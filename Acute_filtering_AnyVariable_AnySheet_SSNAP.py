@@ -1,4 +1,3 @@
-import pandas as pd
 import numpy as np
 import os
 import gradio as gr
@@ -8,7 +7,7 @@ EXCEL_PATH = r"C:\SSNAP_dashboard\SSNAP_Dashboard_New_Metrics_2025\Datasets\JanM
 EXPORT_DIR = r"C:\SSNAP_dashboard\SSNAP_Dashboard_New_Metrics_2025\Datasets"
 QUARTER = "2025-Q1"
 
-# Metric IDs from uploaded SSNAP reference
+# Metric IDs from your upload
 METRIC_IDS = [
     "G6.6.3", "H6.6.3", "G6.4", "H6.4", "G6.20", "H6.20", "G6.62", "H6.62", "G9.34", "H9.34",
     "G8.0.3", "H8.0.3", "G14.20", "H14.20", "G7.18.1", "H7.18.1", "G7.4", "H7.4", "J8.11", "K32.11",
@@ -20,6 +19,7 @@ METRIC_IDS = [
     "J18.20", "K13.20", "J38.6", "K29.41", "J36.20", "K29.23", "J37.12", "K29.35", "J34.3", "K29.3"
 ]
 
+# Extract all sheet names from Excel
 def get_sheets():
     try:
         xls = pd.ExcelFile(EXCEL_PATH)
@@ -27,36 +27,17 @@ def get_sheets():
     except Exception as e:
         return [f"❌ Error loading sheets: {e}"]
 
-def extract_metric(sheet_name, metric_id):
+# Extract one metric ID from a sheet
+def extract_single_metric(sheet_name, metric_id, metadata, df):
     try:
-        xls = pd.ExcelFile(EXCEL_PATH)
-        if sheet_name not in xls.sheet_names:
-            return f"❌ Sheet '{sheet_name}' not found.", None
-        df = xls.parse(sheet_name, header=None)
-    except Exception as e:
-        return f"❌ Failed to load sheet: {e}", None
-
-    try:
-        metadata = df.iloc[0:4, 4:].T
-        metadata.columns = ['Team Type', 'Region', 'Trust', 'Team']
-        metadata = metadata.dropna(subset=['Team']).reset_index(drop=True)
-    except Exception as e:
-        return f"❌ Failed to extract metadata: {e}", None
-
-    try:
-        # Search in column 0 (not column 1)
         metric_row = df[df.iloc[:, 0].astype(str).str.contains(metric_id, na=False)]
         if metric_row.empty:
-            return f"❌ Metric ID '{metric_id}' not found in column 0 of sheet '{sheet_name}'.", None
-
+            return None  # Don't raise here—just skip
         metric_label = metric_row.iloc[0, 0]
         metric_values = metric_row.iloc[0, 4:4 + len(metadata)]
-    except Exception as e:
-        return f"❌ Error extracting metric '{metric_id}': {e}", None
 
-    records = []
-    for i in range(min(len(metadata), len(metric_values))):
-        try:
+        records = []
+        for i in range(min(len(metadata), len(metric_values))):
             team = metadata.iloc[i]
             value = metric_values.iloc[i]
             clean_value = (
@@ -73,34 +54,58 @@ def extract_metric(sheet_name, metric_id):
                 "Metric Label": metric_label,
                 "Value": clean_value
             })
-        except Exception:
-            continue
+        return records
+    except Exception:
+        return None
+
+# Handle one or many metrics
+def extract_multiple_metrics(sheet_name, selected_metrics):
+    if not selected_metrics:
+        return "❌ Please select at least one metric.", None
 
     try:
-        df_cleaned = pd.DataFrame(records)
-        output_file = os.path.join(EXPORT_DIR, f"{metric_id}_Outcome_Measures_{QUARTER}_FIXED.csv")
-        df_cleaned.to_csv(output_file, index=False)
-        return f"✅ Exported: {output_file}", output_file
+        xls = pd.ExcelFile(EXCEL_PATH)
+        df = xls.parse(sheet_name, header=None)
+        metadata = df.iloc[0:4, 4:].T
+        metadata.columns = ['Team Type', 'Region', 'Trust', 'Team']
+        metadata = metadata.dropna(subset=['Team']).reset_index(drop=True)
     except Exception as e:
-        return f"❌ Failed to export: {e}", None
+        return f"❌ Error loading or parsing sheet: {e}", None
 
-def gradio_interface(sheet_name, metric_id):
-    return extract_metric(sheet_name, metric_id)
+    # Combine all metrics
+    all_records = []
+    for metric_id in selected_metrics:
+        result = extract_single_metric(sheet_name, metric_id, metadata, df)
+        if result:
+            all_records.extend(result)
 
+    if not all_records:
+        return f"❌ No valid data found for selected metrics.", None
+
+    df_combined = pd.DataFrame(all_records)
+    output_file = os.path.join(EXPORT_DIR, f"Combined_Metrics_{QUARTER}_FIXED.csv")
+    df_combined.to_csv(output_file, index=False)
+    return f"✅ Exported: {output_file}", output_file
+
+# Gradio interface
+def gradio_interface(sheet_name, metric_ids):
+    return extract_multiple_metrics(sheet_name, metric_ids)
+
+# UI setup
 sheet_choices = get_sheets()
 
 demo = gr.Interface(
     fn=gradio_interface,
     inputs=[
         gr.Dropdown(choices=sheet_choices, label="Select Sheet"),
-        gr.Dropdown(choices=METRIC_IDS, label="Select Metric ID")
+        gr.CheckboxGroup(choices=METRIC_IDS, label="Select Metric IDs (tick multiple or all)")
     ],
     outputs=[
         gr.Textbox(label="Status"),
-        gr.File(label="Download Cleaned CSV")
+        gr.File(label="Download CSV")
     ],
-    title="SSNAP Metric Extractor",
-    description="Select a sheet and metric ID to extract structured CSV output for Power BI."
+    title="SSNAP Multi-Metric Extractor",
+    description="Select a sheet and one or more metric IDs to export as a combined CSV file."
 )
 
 if __name__ == "__main__":
