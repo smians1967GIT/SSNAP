@@ -1,5 +1,5 @@
-import numpy as np
 import pandas as pd
+import numpy as np
 import os
 import gradio as gr
 
@@ -8,7 +8,7 @@ EXCEL_PATH = r"C:\SSNAP_dashboard\SSNAP_Dashboard_New_Metrics_2025\Datasets\JanM
 EXPORT_DIR = r"C:\SSNAP_dashboard\SSNAP_Dashboard_New_Metrics_2025\Datasets"
 QUARTER = "2025-Q1"
 
-# Metric IDs from your upload
+# Metric IDs list (Patient & Team)
 METRIC_IDS = [
     "G6.6.3", "H6.6.3", "G6.4", "H6.4", "G6.20", "H6.20", "G6.62", "H6.62", "G9.34", "H9.34",
     "G8.0.3", "H8.0.3", "G14.20", "H14.20", "G7.18.1", "H7.18.1", "G7.4", "H7.4", "J8.11", "K32.11",
@@ -20,7 +20,7 @@ METRIC_IDS = [
     "J18.20", "K13.20", "J38.6", "K29.41", "J36.20", "K29.23", "J37.12", "K29.35", "J34.3", "K29.3"
 ]
 
-# Extract all sheet names from Excel
+# Get all sheet names
 def get_sheets():
     try:
         xls = pd.ExcelFile(EXCEL_PATH)
@@ -28,15 +28,14 @@ def get_sheets():
     except Exception as e:
         return [f"❌ Error loading sheets: {e}"]
 
-# Extract one metric ID from a sheet
+# Extract one metric
 def extract_single_metric(sheet_name, metric_id, metadata, df):
     try:
         metric_row = df[df.iloc[:, 0].astype(str).str.contains(metric_id, na=False)]
         if metric_row.empty:
-            return None  # Don't raise here—just skip
+            return None
         metric_label = metric_row.iloc[0, 0]
         metric_values = metric_row.iloc[0, 4:4 + len(metadata)]
-
         records = []
         for i in range(min(len(metadata), len(metric_values))):
             team = metadata.iloc[i]
@@ -59,7 +58,7 @@ def extract_single_metric(sheet_name, metric_id, metadata, df):
     except Exception:
         return None
 
-# Handle one or many metrics
+# Extract multiple metrics
 def extract_multiple_metrics(sheet_name, selected_metrics):
     if not selected_metrics:
         return "❌ Please select at least one metric.", None
@@ -73,7 +72,6 @@ def extract_multiple_metrics(sheet_name, selected_metrics):
     except Exception as e:
         return f"❌ Error loading or parsing sheet: {e}", None
 
-    # Combine all metrics
     all_records = []
     for metric_id in selected_metrics:
         result = extract_single_metric(sheet_name, metric_id, metadata, df)
@@ -81,33 +79,35 @@ def extract_multiple_metrics(sheet_name, selected_metrics):
             all_records.extend(result)
 
     if not all_records:
-        return f"❌ No valid data found for selected metrics.", None
+        return "❌ No valid data found for selected metrics.", None
 
     df_combined = pd.DataFrame(all_records)
     output_file = os.path.join(EXPORT_DIR, f"Combined_Metrics_{QUARTER}_FIXED.csv")
     df_combined.to_csv(output_file, index=False)
     return f"✅ Exported: {output_file}", output_file
 
-# Gradio interface
+# Logic for Select All button
+def select_all_metrics():
+    return gr.update(value=METRIC_IDS)
+
+# Main interface logic
 def gradio_interface(sheet_name, metric_ids):
     return extract_multiple_metrics(sheet_name, metric_ids)
 
-# UI setup
+# Build UI
 sheet_choices = get_sheets()
 
-demo = gr.Interface(
-    fn=gradio_interface,
-    inputs=[
-        gr.Dropdown(choices=sheet_choices, label="Select Sheet"),
-        gr.CheckboxGroup(choices=METRIC_IDS, label="Select Metric IDs (tick multiple or all)")
-    ],
-    outputs=[
-        gr.Textbox(label="Status"),
-        gr.File(label="Download CSV")
-    ],
-    title="SSNAP Multi-Metric Extractor",
-    description="Select a sheet and one or more metric IDs to export as a combined CSV file."
-)
+with gr.Blocks() as demo:
+    gr.Markdown("## SSNAP Multi-Metric Extractor with Select All")
+    sheet_dropdown = gr.Dropdown(choices=sheet_choices, label="Select Sheet")
+    metric_checkboxes = gr.CheckboxGroup(choices=METRIC_IDS, label="Select Metric IDs")
+    select_all_btn = gr.Button("Select All Metrics")
+    status = gr.Textbox(label="Status")
+    download = gr.File(label="Download CSV")
+
+    select_all_btn.click(fn=select_all_metrics, inputs=[], outputs=metric_checkboxes)
+    submit_btn = gr.Button("Export Selected Metrics")
+    submit_btn.click(fn=gradio_interface, inputs=[sheet_dropdown, metric_checkboxes], outputs=[status, download])
 
 if __name__ == "__main__":
     demo.launch(allowed_paths=[r"C:\SSNAP_dashboard\SSNAP_Dashboard_New_Metrics_2025\Datasets"])
