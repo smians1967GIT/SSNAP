@@ -1,5 +1,5 @@
-import numpy as np
 import pandas as pd
+import numpy as np
 import os
 import re
 import gradio as gr
@@ -21,7 +21,7 @@ METRIC_IDS = [
     "J18.20", "K13.20", "J38.6", "K29.41", "J36.20", "K29.23", "J37.12", "K29.35", "J34.3", "K29.3"
 ]
 
-# --- Convert HH:MM → MM ---
+# --- Convert HH:MM to total minutes ---
 def hhmm_to_minutes(value):
     try:
         if isinstance(value, str) and re.match(r"^\d{1,2}:\d{2}$", value.strip()):
@@ -31,7 +31,7 @@ def hhmm_to_minutes(value):
     except:
         return value
 
-# --- Get sheet names ---
+# --- Sheet names ---
 def get_sheets():
     try:
         xls = pd.ExcelFile(EXCEL_PATH)
@@ -39,7 +39,7 @@ def get_sheets():
     except Exception as e:
         return [f"❌ Error loading sheets: {e}"]
 
-# --- Extract one metric ---
+# --- Extract single metric ---
 def extract_single_metric(sheet_name, metric_id, metadata, df):
     try:
         metric_row = df[df.iloc[:, 0].astype(str).str.contains(metric_id, na=False)]
@@ -47,6 +47,7 @@ def extract_single_metric(sheet_name, metric_id, metadata, df):
             return None
         metric_label = metric_row.iloc[0, 0]
         metric_values = metric_row.iloc[0, 4:4 + len(metadata)]
+
         records = []
         for i in range(min(len(metadata), len(metric_values))):
             team = metadata.iloc[i]
@@ -72,7 +73,7 @@ def extract_single_metric(sheet_name, metric_id, metadata, df):
     except Exception:
         return None
 
-# --- Extract multiple metrics and export transposed ---
+# --- Extract and export multiple metrics (transposed) ---
 def extract_multiple_metrics(sheet_name, selected_metrics):
     if not selected_metrics:
         return "❌ Please select at least one metric.", None
@@ -96,14 +97,9 @@ def extract_multiple_metrics(sheet_name, selected_metrics):
         return "❌ No valid data found for selected metrics.", None
 
     df_combined = pd.DataFrame(all_records)
-
-    # Ensure all values are numeric before pivoting
     df_combined["Value"] = pd.to_numeric(df_combined["Value"], errors="coerce")
-
-    # Add column name with ID and label
     df_combined["Metric Header"] = df_combined["Metric ID"] + " - " + df_combined["Metric Label"].astype(str)
 
-    # Pivot and aggregate
     df_pivot = df_combined.pivot_table(
         index=["Quarter", "Domain", "Team Type", "Region", "Trust", "Team"],
         columns="Metric Header",
@@ -112,37 +108,70 @@ def extract_multiple_metrics(sheet_name, selected_metrics):
     ).reset_index()
 
     df_pivot.columns.name = None
-
     output_file = os.path.join(EXPORT_DIR, f"Combined_Metrics_{QUARTER}_TRANSPOSED.csv")
     df_pivot.to_csv(output_file, index=False)
-
     return f"✅ Exported: {output_file}", output_file
 
-# --- "Select All" logic ---
-def select_all_metrics():
-    return gr.update(value=METRIC_IDS)
+# --- Dynamic filtering by metric type ---
+def filter_metrics_by_type(metric_type):
+    if metric_type == "Patient":
+        filtered = [m for m in METRIC_IDS if m.startswith("G") or m.startswith("J")]
+    elif metric_type == "Team":
+        filtered = [m for m in METRIC_IDS if m.startswith("H") or m.startswith("K")]
+    else:
+        filtered = METRIC_IDS
+    return gr.update(choices=filtered, value=[])
 
-# --- Gradio interface handler ---
-def gradio_interface(sheet_name, metric_ids):
-    return extract_multiple_metrics(sheet_name, metric_ids)
+# --- Select All ---
+def select_all_metrics(metric_type):
+    if metric_type == "Patient":
+        return [m for m in METRIC_IDS if m.startswith("G") or m.startswith("J")]
+    elif metric_type == "Team":
+        return [m for m in METRIC_IDS if m.startswith("H") or m.startswith("K")]
+    else:
+        return METRIC_IDS
 
-# --- UI ---
+# --- Main interface function ---
+def gradio_interface(sheet_name, selected_metrics):
+    return extract_multiple_metrics(sheet_name, selected_metrics)
+
+# --- Build Gradio App ---
 sheet_choices = get_sheets()
 
 with gr.Blocks() as demo:
-    gr.Markdown("## 🧠 SSNAP Multi-Metric Extractor (Transposed with Metric Labels)")
+    gr.Markdown("## 🧠 SSNAP Multi-Metric Extractor with Patient/Team Filter")
 
     sheet_dropdown = gr.Dropdown(choices=sheet_choices, label="Select Sheet")
+
+    metric_type_dropdown = gr.Dropdown(choices=["Patient", "Team", "Both"], value="Both", label="Select Metric Type")
     metric_checkboxes = gr.CheckboxGroup(choices=METRIC_IDS, label="Select Metric IDs")
     select_all_btn = gr.Button("Select All Metrics")
     export_btn = gr.Button("Export Selected Metrics")
 
     status_box = gr.Textbox(label="Status")
-    file_download = gr.File(label="Download Cleaned Transposed CSV")
+    file_download = gr.File(label="Download Transposed CSV")
 
-    select_all_btn.click(fn=select_all_metrics, outputs=metric_checkboxes)
-    export_btn.click(fn=gradio_interface, inputs=[sheet_dropdown, metric_checkboxes], outputs=[status_box, file_download])
+    # Hook: dropdown change updates checkbox options
+    metric_type_dropdown.change(
+        fn=filter_metrics_by_type,
+        inputs=metric_type_dropdown,
+        outputs=metric_checkboxes
+    )
 
-# --- Launch ---
+    # Hook: select all applies filtered options
+    select_all_btn.click(
+        fn=select_all_metrics,
+        inputs=metric_type_dropdown,
+        outputs=metric_checkboxes
+    )
+
+    # Hook: export
+    export_btn.click(
+        fn=gradio_interface,
+        inputs=[sheet_dropdown, metric_checkboxes],
+        outputs=[status_box, file_download]
+    )
+
+# --- Launch the app ---
 if __name__ == "__main__":
     demo.launch(allowed_paths=[r"C:\SSNAP_dashboard\SSNAP_Dashboard_New_Metrics_2025\Datasets"])
