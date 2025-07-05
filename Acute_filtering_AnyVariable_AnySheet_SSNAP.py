@@ -3,6 +3,7 @@ import numpy as np
 import os
 import re
 import tempfile
+import traceback
 import gradio as gr
 
 # --- Configuration ---
@@ -35,6 +36,8 @@ def load_sheet_names(filepath):
         xls = pd.ExcelFile(filepath)
         return xls.sheet_names
     except Exception as e:
+        print("❌ Failed to load sheets:")
+        traceback.print_exc()
         return [f"❌ Error loading sheets: {e}"]
 
 def load_sheet_names_with_default(filepath):
@@ -71,50 +74,56 @@ def extract_single_metric(sheet_name, metric_id, metadata, df):
                 "Value": clean_value
             })
         return records
-    except Exception:
+    except Exception as e:
+        print(f"❌ Failed to extract metric {metric_id} from sheet {sheet_name}")
+        traceback.print_exc()
         return None
 
 def extract_multiple_metrics(filepath, sheet_name, selected_metrics, export_dir):
-    if not selected_metrics:
-        return "❌ Please select at least one metric.", None
-
     try:
+        if not selected_metrics:
+            return "❌ Please select at least one metric.", None
+
         xls = pd.ExcelFile(filepath)
         df = xls.parse(sheet_name, header=None)
+
         metadata = df.iloc[0:4, 4:].T
         metadata.columns = ['Team Type', 'Region', 'Trust', 'Team']
         metadata = metadata.dropna(subset=['Team']).reset_index(drop=True)
+
+        all_records = []
+        for metric_id in selected_metrics:
+            result = extract_single_metric(sheet_name, metric_id, metadata, df)
+            if result:
+                all_records.extend(result)
+
+        if not all_records:
+            return "❌ No valid data found for selected metrics.", None
+
+        df_combined = pd.DataFrame(all_records)
+        df_combined["Value"] = pd.to_numeric(df_combined["Value"], errors="coerce")
+        df_combined["Metric Header"] = df_combined["Metric ID"] + " - " + df_combined["Metric Label"].astype(str)
+
+        df_pivot = df_combined.pivot_table(
+            index=["Quarter", "Domain", "Team Type", "Region", "Trust", "Team"],
+            columns="Metric Header",
+            values="Value",
+            aggfunc="mean"
+        ).reset_index()
+        df_pivot.columns.name = None
+
+        if not os.path.exists(export_dir):
+            os.makedirs(export_dir)
+
+        output_file = os.path.join(export_dir, f"Combined_Metrics_{QUARTER}_TRANSPOSED.csv")
+        df_pivot.to_csv(output_file, index=False)
+
+        return f"✅ Exported: {output_file}", output_file
+
     except Exception as e:
-        return f"❌ Error loading or parsing sheet: {e}", None
-
-    all_records = []
-    for metric_id in selected_metrics:
-        result = extract_single_metric(sheet_name, metric_id, metadata, df)
-        if result:
-            all_records.extend(result)
-
-    if not all_records:
-        return "❌ No valid data found for selected metrics.", None
-
-    df_combined = pd.DataFrame(all_records)
-    df_combined["Value"] = pd.to_numeric(df_combined["Value"], errors="coerce")
-    df_combined["Metric Header"] = df_combined["Metric ID"] + " - " + df_combined["Metric Label"].astype(str)
-
-    df_pivot = df_combined.pivot_table(
-        index=["Quarter", "Domain", "Team Type", "Region", "Trust", "Team"],
-        columns="Metric Header",
-        values="Value",
-        aggfunc="mean"
-    ).reset_index()
-    df_pivot.columns.name = None
-
-    if not os.path.exists(export_dir):
-        os.makedirs(export_dir)
-
-    output_file = os.path.join(export_dir, f"Combined_Metrics_{QUARTER}_TRANSPOSED.csv")
-    df_pivot.to_csv(output_file, index=False)
-
-    return f"✅ Exported: {output_file}", output_file
+        print("❌ Error during extraction:")
+        traceback.print_exc()
+        return f"❌ Extraction failed: {str(e)}", None
 
 def filter_metrics_by_type(metric_type):
     if metric_type == "Patient":
@@ -134,7 +143,12 @@ def select_all_metrics(metric_type):
         return METRIC_IDS
 
 def gradio_interface(filepath, sheet_name, metric_ids, export_dir):
-    return extract_multiple_metrics(filepath, sheet_name, metric_ids, export_dir)
+    try:
+        return extract_multiple_metrics(filepath, sheet_name, metric_ids, export_dir)
+    except Exception as e:
+        print("❌ Unhandled Gradio interface error:")
+        traceback.print_exc()
+        return f"❌ Unexpected error: {str(e)}", None
 
 # --- Build Gradio App ---
 with gr.Blocks() as demo:
