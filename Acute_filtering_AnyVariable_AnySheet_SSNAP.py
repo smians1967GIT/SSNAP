@@ -1,14 +1,15 @@
-import gradio as gr
 import pandas as pd
 import numpy as np
 import os
-import tempfile
 import re
+import tempfile
+import gradio as gr
 
-sheet_cache = {}
+# --- Configuration ---
 QUARTER = "2025-Q1"
+EXPORT_DIR = r"C:\SSNAP_dashboard\SSNAP_Dashboard_New_Metrics_2025\Datasets"
 
-# Complete SSNAP Metric IDs
+# --- Metric IDs (Patient + Team) ---
 METRIC_IDS = [
     "G6.6.3", "H6.6.3", "G6.4", "H6.4", "G6.20", "H6.20", "G6.62", "H6.62", "G9.34", "H9.34",
     "G8.0.3", "H8.0.3", "G14.20", "H14.20", "G7.18.1", "H7.18.1", "G7.4", "H7.4", "J8.11", "K32.11",
@@ -29,97 +30,138 @@ def hhmm_to_minutes(value):
     except:
         return value
 
-def handle_file_upload(file):
-    if file is None or not os.path.exists(file):
-        return gr.update(choices=[], value=None)
+def load_sheet_names(filepath):
     try:
-        xls = pd.ExcelFile(file)
-        sheet_cache[file] = xls.sheet_names
-        return gr.update(choices=xls.sheet_names, value=xls.sheet_names[0])
+        xls = pd.ExcelFile(filepath)
+        return xls.sheet_names
     except Exception as e:
-        return gr.update(choices=[f"❌ {str(e)}"], value=None)
+        return [f"❌ Error loading sheets: {e}"]
 
-def filter_metrics(metric_type):
+def load_sheet_names_with_default(filepath):
+    sheets = load_sheet_names(filepath)
+    if isinstance(sheets, list) and len(sheets) > 0:
+        return gr.update(choices=sheets, value=sheets[0])
+    return gr.update(choices=[], value=None)
+
+def extract_single_metric(sheet_name, metric_id, metadata, df):
+    try:
+        metric_row = df[df.iloc[:, 0].astype(str).str.contains(metric_id, na=False)]
+        if metric_row.empty:
+            return None
+        metric_label = metric_row.iloc[0, 0]
+        metric_values = metric_row.iloc[0, 4:4 + len(metadata)]
+        records = []
+        for i in range(min(len(metadata), len(metric_values))):
+            team = metadata.iloc[i]
+            value = metric_values.iloc[i]
+            raw_value = str(value).strip().lower()
+            if raw_value in ["", " ", "too few to report", ".", "n/a", "nan"]:
+                clean_value = np.nan
+            else:
+                clean_value = hhmm_to_minutes(raw_value)
+            records.append({
+                "Quarter": QUARTER,
+                "Domain": sheet_name,
+                "Team Type": team["Team Type"],
+                "Region": team["Region"],
+                "Trust": team["Trust"],
+                "Team": team["Team"],
+                "Metric ID": metric_id,
+                "Metric Label": metric_label,
+                "Value": clean_value
+            })
+        return records
+    except Exception:
+        return None
+
+def extract_multiple_metrics(filepath, sheet_name, selected_metrics, export_dir):
+    if not selected_metrics:
+        return "❌ Please select at least one metric.", None
+
+    try:
+        xls = pd.ExcelFile(filepath)
+        df = xls.parse(sheet_name, header=None)
+        metadata = df.iloc[0:4, 4:].T
+        metadata.columns = ['Team Type', 'Region', 'Trust', 'Team']
+        metadata = metadata.dropna(subset=['Team']).reset_index(drop=True)
+    except Exception as e:
+        return f"❌ Error loading or parsing sheet: {e}", None
+
+    all_records = []
+    for metric_id in selected_metrics:
+        result = extract_single_metric(sheet_name, metric_id, metadata, df)
+        if result:
+            all_records.extend(result)
+
+    if not all_records:
+        return "❌ No valid data found for selected metrics.", None
+
+    df_combined = pd.DataFrame(all_records)
+    df_combined["Value"] = pd.to_numeric(df_combined["Value"], errors="coerce")
+    df_combined["Metric Header"] = df_combined["Metric ID"] + " - " + df_combined["Metric Label"].astype(str)
+
+    df_pivot = df_combined.pivot_table(
+        index=["Quarter", "Domain", "Team Type", "Region", "Trust", "Team"],
+        columns="Metric Header",
+        values="Value",
+        aggfunc="mean"
+    ).reset_index()
+    df_pivot.columns.name = None
+
+    if not os.path.exists(export_dir):
+        os.makedirs(export_dir)
+
+    output_file = os.path.join(export_dir, f"Combined_Metrics_{QUARTER}_TRANSPOSED.csv")
+    df_pivot.to_csv(output_file, index=False)
+
+    return f"✅ Exported: {output_file}", output_file
+
+def filter_metrics_by_type(metric_type):
+    if metric_type == "Patient":
+        filtered = [m for m in METRIC_IDS if m.startswith("G") or m.startswith("J")]
+    elif metric_type == "Team":
+        filtered = [m for m in METRIC_IDS if m.startswith("H") or m.startswith("K")]
+    else:
+        filtered = METRIC_IDS
+    return gr.update(choices=filtered, value=[])
+
+def select_all_metrics(metric_type):
     if metric_type == "Patient":
         return [m for m in METRIC_IDS if m.startswith("G") or m.startswith("J")]
     elif metric_type == "Team":
         return [m for m in METRIC_IDS if m.startswith("H") or m.startswith("K")]
-    return METRIC_IDS
+    else:
+        return METRIC_IDS
 
-def extract_single_metric(sheet, metric_id, metadata, df):
-    metric_row = df[df.iloc[:, 0].astype(str).str.contains(metric_id, na=False)]
-    if metric_row.empty:
-        return None
-    metric_label = metric_row.iloc[0, 0]
-    metric_values = metric_row.iloc[0, 4:4 + len(metadata)]
-    records = []
-    for i in range(min(len(metadata), len(metric_values))):
-        team = metadata.iloc[i]
-        value = metric_values.iloc[i]
-        raw_value = str(value).strip()
-        clean_value = (np.nan if raw_value in ["", " ", "Too few to report", ".", "N/A", "nan"]
-                       else hhmm_to_minutes(raw_value))
-        records.append({
-            "Quarter": QUARTER,
-            "Domain": sheet,
-            "Team Type": team["Team Type"],
-            "Region": team["Region"],
-            "Trust": team["Trust"],
-            "Team": team["Team"],
-            "Metric ID": metric_id,
-            "Metric Label": metric_label,
-            "Value": clean_value
-        })
-    return records
+def gradio_interface(filepath, sheet_name, metric_ids, export_dir):
+    return extract_multiple_metrics(filepath, sheet_name, metric_ids, export_dir)
 
-def export_metrics(file, sheet, metric_list):
-    if not metric_list:
-        return "❌ Select at least one metric", None
-    try:
-        df = pd.read_excel(file, sheet_name=sheet, header=None)
-        metadata = df.iloc[0:4, 4:].T
-        metadata.columns = ['Team Type', 'Region', 'Trust', 'Team']
-        metadata = metadata.dropna(subset=['Team']).reset_index(drop=True)
-        all_records = []
-        for m in metric_list:
-            rows = extract_single_metric(sheet, m, metadata, df)
-            if rows:
-                all_records.extend(rows)
-        if not all_records:
-            return "❌ No matching metrics found.", None
-        df_all = pd.DataFrame(all_records)
-        df_all["Value"] = pd.to_numeric(df_all["Value"], errors="coerce")
-        df_all["Metric Header"] = df_all["Metric ID"] + " - " + df_all["Metric Label"].astype(str)
-        df_pivot = df_all.pivot_table(
-            index=["Quarter", "Domain", "Team Type", "Region", "Trust", "Team"],
-            columns="Metric Header", values="Value", aggfunc="mean"
-        ).reset_index()
-        df_pivot.columns.name = None
-        out_path = tempfile.NamedTemporaryFile(delete=False, suffix=".csv").name
-        df_pivot.to_csv(out_path, index=False)
-        return f"✅ Exported: {out_path}", out_path
-    except Exception as e:
-        return f"❌ {str(e)}", None
-
-def select_all_metrics(metric_type):
-    return filter_metrics(metric_type)
-
+# --- Build Gradio App ---
 with gr.Blocks() as demo:
-    gr.Markdown("## 🧠 SSNAP Metrics Extractor (Safe Sheet Selection)")
-    file_input = gr.File(label="Upload Excel File", file_types=[".xlsx"], type="filepath")
-    sheet_dropdown = gr.Dropdown(label="Select Sheet", choices=[])
-    file_input.change(fn=handle_file_upload, inputs=file_input, outputs=sheet_dropdown)
+    gr.Markdown("## 🧠 SSNAP Multi-Metric Extractor (Upload + Filtered Export)")
 
-    metric_type = gr.Dropdown(["Patient", "Team", "Both"], label="Metric Type")
-    metric_select = gr.CheckboxGroup(choices=[], label="Choose Metrics")
-    select_all_btn = gr.Button("Select All")
+    file_input = gr.File(label="Upload Excel File (.xlsx)", type="filepath")
+    sheet_dropdown = gr.Dropdown(label="Select Sheet")
 
-    metric_type.change(fn=lambda t: gr.update(choices=filter_metrics(t), value=[]), inputs=metric_type, outputs=metric_select)
-    select_all_btn.click(fn=select_all_metrics, inputs=metric_type, outputs=metric_select)
+    file_input.change(fn=load_sheet_names_with_default, inputs=file_input, outputs=sheet_dropdown)
 
-    export_btn = gr.Button("Export to CSV")
-    status = gr.Textbox(label="Status")
-    file_output = gr.File(label="Download CSV")
-    export_btn.click(fn=export_metrics, inputs=[file_input, sheet_dropdown, metric_select], outputs=[status, file_output])
+    metric_type_dropdown = gr.Dropdown(choices=["Patient", "Team", "Both"], value="Both", label="Select Metric Type")
+    metric_checkboxes = gr.CheckboxGroup(choices=METRIC_IDS, label="Select Metric IDs")
+    select_all_btn = gr.Button("Select All Metrics")
 
-demo.launch()
+    export_dir_input = gr.Textbox(label="Export Directory (Full Path)", value=EXPORT_DIR)
+    export_btn = gr.Button("Export Selected Metrics")
+
+    status_box = gr.Textbox(label="Status")
+    file_download = gr.File(label="Download CSV")
+
+    metric_type_dropdown.change(fn=filter_metrics_by_type, inputs=metric_type_dropdown, outputs=metric_checkboxes)
+    select_all_btn.click(fn=select_all_metrics, inputs=metric_type_dropdown, outputs=metric_checkboxes)
+    export_btn.click(
+        fn=gradio_interface,
+        inputs=[file_input, sheet_dropdown, metric_checkboxes, export_dir_input],
+        outputs=[status_box, file_download]
+    )
+
+if __name__ == "__main__":
+    demo.launch(allowed_paths=[EXPORT_DIR, os.getcwd(), tempfile.gettempdir()])
