@@ -8,7 +8,6 @@ import datetime
 import gradio as gr
 
 # --- Configuration ---
-QUARTER = "2025-Q1"
 EXPORT_DIR = r"C:\SSNAP_dashboard\SSNAP_Dashboard_New_Metrics_2025\Datasets"
 
 # --- Metric IDs (Patient + Team) ---
@@ -51,7 +50,7 @@ def load_sheet_names_with_default(filepath):
         return gr.update(choices=sheets, value=sheets[0])
     return gr.update(choices=[], value=None)
 
-def extract_single_metric(sheet_name, metric_id, metadata, df):
+def extract_single_metric(sheet_name, metric_id, metadata, df, quarter):
     try:
         metric_row = df[df.iloc[:, 0].astype(str).str.contains(metric_id, na=False)]
         if metric_row.empty:
@@ -69,7 +68,7 @@ def extract_single_metric(sheet_name, metric_id, metadata, df):
             else:
                 clean_value = hhmm_to_minutes(raw_value)
             records.append({
-                "Quarter": QUARTER,
+                "Quarter": quarter,
                 "Domain": sheet_name,
                 "Team Type": team["Team Type"],
                 "Region": team["Region"],
@@ -85,7 +84,7 @@ def extract_single_metric(sheet_name, metric_id, metadata, df):
         traceback.print_exc()
         return []
 
-def extract_multiple_metrics(filepath, sheet_name, selected_metrics, export_dir):
+def extract_multiple_metrics(filepath, sheet_name, selected_metrics, export_dir, quarter):
     try:
         if not selected_metrics:
             return "❌ Please select at least one metric.", None
@@ -105,7 +104,7 @@ def extract_multiple_metrics(filepath, sheet_name, selected_metrics, export_dir)
         log_entries = []
 
         for metric_id in selected_metrics:
-            result = extract_single_metric(sheet_name, metric_id, metadata, df)
+            result = extract_single_metric(sheet_name, metric_id, metadata, df, quarter)
             if result:
                 all_records.extend(result)
                 log_entries.append(f"{datetime.datetime.now()}: Processed {metric_id} from {sheet_name}")
@@ -128,7 +127,7 @@ def extract_multiple_metrics(filepath, sheet_name, selected_metrics, export_dir)
         if not os.path.exists(export_dir):
             os.makedirs(export_dir)
 
-        output_file = os.path.join(export_dir, f"Combined_Metrics_{QUARTER}_TRANSPOSED.csv")
+        output_file = os.path.join(export_dir, f"Combined_Metrics_{quarter}_TRANSPOSED.csv")
         df_pivot.to_csv(output_file, index=False)
 
         # Write log file
@@ -161,9 +160,9 @@ def select_all_metrics(metric_type):
     else:
         return METRIC_IDS
 
-def gradio_interface(filepath, sheet_name, metric_ids, export_dir):
+def gradio_interface(filepath, sheet_name, metric_ids, export_dir, quarter):
     try:
-        return extract_multiple_metrics(filepath, sheet_name, metric_ids, export_dir)
+        return extract_multiple_metrics(filepath, sheet_name, metric_ids, export_dir, quarter)
     except Exception as e:
         print("❌ Unhandled Gradio interface error:")
         traceback.print_exc()
@@ -177,7 +176,7 @@ with gr.Blocks() as demo:
     1. Upload your SSNAP Excel file.
     2. Select the correct sheet (each sheet corresponds to a Domain).
     3. Filter and select metric IDs to extract (Patient / Team / Both).
-    4. Choose export directory (default is set).
+    4. Input the quarter in the format `YYYY-Qx` (e.g., 2025-Q1).
     5. Click **Export Selected Metrics** to extract, transform, and save the data.
     """)
 
@@ -189,6 +188,7 @@ with gr.Blocks() as demo:
     metric_checkboxes = gr.CheckboxGroup(choices=METRIC_IDS, label="Select Metric IDs")
     select_all_btn = gr.Button("Select All Metrics")
 
+    quarter_input = gr.Textbox(label="Quarter (Format: YYYY-Qx)", placeholder="2025-Q1")
     export_dir_input = gr.Textbox(label="Export Directory (Full Path)", value=EXPORT_DIR)
     export_btn = gr.Button("Export Selected Metrics")
 
@@ -199,7 +199,7 @@ with gr.Blocks() as demo:
     select_all_btn.click(fn=select_all_metrics, inputs=metric_type_dropdown, outputs=metric_checkboxes)
     export_btn.click(
         fn=gradio_interface,
-        inputs=[file_input, sheet_dropdown, metric_checkboxes, export_dir_input],
+        inputs=[file_input, sheet_dropdown, metric_checkboxes, export_dir_input, quarter_input],
         outputs=[status_box, file_download]
     )
 
