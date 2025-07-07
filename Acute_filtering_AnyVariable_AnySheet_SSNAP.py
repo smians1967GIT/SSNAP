@@ -4,6 +4,7 @@ import os
 import re
 import tempfile
 import traceback
+import datetime
 import gradio as gr
 
 # --- Configuration ---
@@ -24,8 +25,12 @@ METRIC_IDS = [
 
 def hhmm_to_minutes(value):
     try:
-        if isinstance(value, str) and re.match(r"^\d{1,2}:\d{2}$", value.strip()):
-            h, m = map(int, value.strip().split(":"))
+        if isinstance(value, str) and re.match(r"^\d{1,2}:\d{2}(:\d{2})?$", value.strip()):
+            parts = list(map(int, value.strip().split(":")))
+            if len(parts) == 2:
+                h, m = parts
+            elif len(parts) == 3:
+                h, m, _ = parts
             return h * 60 + m
         return value
     except:
@@ -50,7 +55,8 @@ def extract_single_metric(sheet_name, metric_id, metadata, df):
     try:
         metric_row = df[df.iloc[:, 0].astype(str).str.contains(metric_id, na=False)]
         if metric_row.empty:
-            return None
+            print(f"⚠️ Metric {metric_id} not found in sheet: {sheet_name}")
+            return []
         metric_label = metric_row.iloc[0, 0]
         metric_values = metric_row.iloc[0, 4:4 + len(metadata)]
         records = []
@@ -77,7 +83,7 @@ def extract_single_metric(sheet_name, metric_id, metadata, df):
     except Exception as e:
         print(f"❌ Failed to extract metric {metric_id} from sheet {sheet_name}")
         traceback.print_exc()
-        return None
+        return []
 
 def extract_multiple_metrics(filepath, sheet_name, selected_metrics, export_dir):
     try:
@@ -87,15 +93,22 @@ def extract_multiple_metrics(filepath, sheet_name, selected_metrics, export_dir)
         xls = pd.ExcelFile(filepath)
         df = xls.parse(sheet_name, header=None)
 
+        known_id_sample = METRIC_IDS[0]
+        if not df.iloc[:, 0].astype(str).str.contains(known_id_sample).any():
+            print("⚠️ Warning: Expected metric headers not found in the first column.")
+
         metadata = df.iloc[0:4, 4:].T
         metadata.columns = ['Team Type', 'Region', 'Trust', 'Team']
         metadata = metadata.dropna(subset=['Team']).reset_index(drop=True)
 
         all_records = []
+        log_entries = []
+
         for metric_id in selected_metrics:
             result = extract_single_metric(sheet_name, metric_id, metadata, df)
             if result:
                 all_records.extend(result)
+                log_entries.append(f"{datetime.datetime.now()}: Processed {metric_id} from {sheet_name}")
 
         if not all_records:
             return "❌ No valid data found for selected metrics.", None
@@ -117,6 +130,12 @@ def extract_multiple_metrics(filepath, sheet_name, selected_metrics, export_dir)
 
         output_file = os.path.join(export_dir, f"Combined_Metrics_{QUARTER}_TRANSPOSED.csv")
         df_pivot.to_csv(output_file, index=False)
+
+        # Write log file
+        log_path = os.path.join(export_dir, "log.txt")
+        with open(log_path, "a", encoding="utf-8") as log_file:
+            for entry in log_entries:
+                log_file.write(entry + "\n")
 
         return f"✅ Exported: {output_file}", output_file
 
@@ -153,10 +172,17 @@ def gradio_interface(filepath, sheet_name, metric_ids, export_dir):
 # --- Build Gradio App ---
 with gr.Blocks() as demo:
     gr.Markdown("## 🧠 SSNAP Multi-Metric Extractor (Upload + Filtered Export)")
+    gr.Markdown("""
+    ### 📘 Instructions:
+    1. Upload your SSNAP Excel file.
+    2. Select the correct sheet (each sheet corresponds to a Domain).
+    3. Filter and select metric IDs to extract (Patient / Team / Both).
+    4. Choose export directory (default is set).
+    5. Click **Export Selected Metrics** to extract, transform, and save the data.
+    """)
 
     file_input = gr.File(label="Upload Excel File (.xlsx)", type="filepath")
     sheet_dropdown = gr.Dropdown(label="Select Sheet")
-
     file_input.change(fn=load_sheet_names_with_default, inputs=file_input, outputs=sheet_dropdown)
 
     metric_type_dropdown = gr.Dropdown(choices=["Patient", "Team", "Both"], value="Both", label="Select Metric Type")
